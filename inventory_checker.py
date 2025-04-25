@@ -5,7 +5,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import time
@@ -16,6 +16,21 @@ class InventoryChecker:
     def __init__(self):
         self.base_url = "https://southernstarz.com"
         self.driver = None
+        self.max_retries = 3
+        self.page_load_timeout = 30
+        self.wait = None
+        
+        # Add direct SKU to URL mappings
+        self.sku_url_mapping = {
+            'S1ANTCHNV': 'https://southernstarz.com/wines/antucura-cherie-sparkling-nv/',
+            'S1NBCHANAC': 'https://southernstarz.com/wines/newblood-chardonnay/',
+            'S1NBCHANAE': 'https://southernstarz.com/wines/newblood-chardonnay/',
+            'S1NBCHANAF': 'https://southernstarz.com/wines/newblood-chardonnay/',
+            'S1NBRBLNAE': 'https://southernstarz.com/wines/newblood-red-blend/',
+            'S1NBRBLNAF': 'https://southernstarz.com/wines/newblood-red-blend/',
+            'S1NBROSNAF': 'https://southernstarz.com/wines/newblood-rose/'
+        }
+        
         self.producers = [
             'Mount Fishtail',
             'Sherwood',
@@ -50,7 +65,10 @@ class InventoryChecker:
             'WILDBERRY': 'Wildberry Estate',
             'VINA ALICIA': 'Vina Alicia',
             'NUGAN': 'Nugan Estate',
-            'GREENOCK': 'Greenock Creek'
+            'GREENOCK': 'Greenock Creek',
+            'NEW BLOOD': 'NEWBLOOD',
+            'NEWBLOOD NON-ALCOHOLIC': 'NEWBLOOD',
+            'ANTUCURA CHERIE': 'Antucura'
         }
         
     def find_producer_in_text(self, text):
@@ -138,8 +156,10 @@ class InventoryChecker:
                                         'On Order': on_order,
                                         'Available': available,
                                         'On Website': False,
+                                        'Has Spec Sheet': False,
+                                        'Has Shelf-Talker': False,
+                                        'Has Hi-Res Label': False,
                                         'Has Bottle Shot': False,
-                                        'Has Label': False,
                                         'Product URL': ''
                                     })
                             except Exception as e:
@@ -158,27 +178,71 @@ class InventoryChecker:
         return pd.DataFrame(data)
 
     def setup_selenium(self):
-        """Initialize Selenium WebDriver"""
+        """Initialize Selenium WebDriver with retry logic"""
         print("\nSetting up web browser...")
-        options = webdriver.ChromeOptions()
-        options.add_argument('--headless')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=options)
-        self.driver.set_page_load_timeout(30)
+        for attempt in range(self.max_retries):
+            try:
+                if self.driver is not None:
+                    try:
+                        self.driver.quit()
+                    except:
+                        pass
+                options = webdriver.ChromeOptions()
+                options.add_argument('--headless')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                options.add_argument('--window-size=1920,1080')
+                # Performance optimizations
+                options.add_argument('--disable-extensions')
+                options.add_argument('--disable-images')
+                options.add_argument('--disable-javascript')
+                options.add_argument('--blink-settings=imagesEnabled=false')
+                options.page_load_strategy = 'eager'
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=options)
+                self.driver.set_page_load_timeout(self.page_load_timeout)
+                self.wait = WebDriverWait(self.driver, 10)
+                return True
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                time.sleep(2)
+        return False
 
-    def wait_for_element(self, selector, timeout=10):
-        """Wait for an element to be present on the page"""
-        try:
-            WebDriverWait(self.driver, timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-            )
-            return True
-        except TimeoutException:
-            return False
+    def safe_get_url(self, url, max_retries=None):
+        """Safely navigate to a URL with retry logic"""
+        if max_retries is None:
+            max_retries = self.max_retries
             
+        for attempt in range(max_retries):
+            try:
+                if not self.driver or not self.is_session_valid():
+                    if not self.setup_selenium():
+                        return False
+                print(f"\nLoading {url}...")
+                self.driver.get(url)
+                self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                return True
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed to load {url}: {str(e)}")
+                time.sleep(2)
+                if "timeout" in str(e).lower():
+                    print("Page load timed out, retrying with longer timeout...")
+                    try:
+                        self.driver.set_page_load_timeout(self.page_load_timeout * 1.5)
+                    except:
+                        pass
+        return False
+
+    def is_session_valid(self):
+        """Check if the current session is valid"""
+        try:
+            # Try to access a simple property
+            _ = self.driver.current_url
+            return True
+        except:
+            return False
+
     def get_page_content(self):
         """Get all text content from the page for debugging"""
         return self.driver.execute_script("""
@@ -219,7 +283,7 @@ class InventoryChecker:
         return None
 
     def get_producer_products(self, producer):
-        """Get all products for a producer from the website"""
+        """Get all products for a producer from the website with improved error handling"""
         producer_url = self.get_producer_page_url(producer)
         if not producer_url:
             print(f"No URL mapping found for producer: {producer}")
@@ -227,63 +291,67 @@ class InventoryChecker:
             
         try:
             print(f"\nChecking {producer_url}...")
-            self.driver.get(producer_url)
-            time.sleep(5)  # Give page time to load
-            
+            if not self.safe_get_url(producer_url):
+                return []
+                
             print(f"Page title: {self.driver.title}")
             print(f"Current URL: {self.driver.current_url}")
             
-            # Look for wine products using Elementor's structure
             products = []
             
-            # Find all article elements that are wine posts
-            wine_elements = self.driver.find_elements(By.CSS_SELECTOR, 'article[type-wines]')
-            print(f"Found {len(wine_elements)} wine elements")
-            
-            for element in wine_elements:
-                try:
-                    # Get the wine title
-                    title = element.find_element(By.CSS_SELECTOR, '.elementor-heading-title').text
-                    if not title:
-                        continue
-                        
-                    # Get the View Wine button link
-                    view_btn = element.find_element(By.CSS_SELECTOR, '.elementor-button-wrapper a')
-                    url = view_btn.get_attribute('href')
-                    
-                    print(f"Found wine: {title}")
-                    products.append({
-                        'title': title,
-                        'url': url
-                    })
-                    
-                except NoSuchElementException:
-                    continue
-                except Exception as e:
-                    print(f"Error processing wine element: {e}")
-                    continue
-                    
-            # If no products found with article elements, try looking for buttons directly
-            if not products:
-                print("Trying alternate approach with View Wine buttons...")
-                buttons = self.driver.find_elements(By.CSS_SELECTOR, '.elementor-button-wrapper a')
-                for button in buttons:
-                    try:
-                        # Get the button's parent container to find the title
-                        container = button.find_element(By.XPATH, './ancestor::article')
-                        title = container.find_element(By.CSS_SELECTOR, '.elementor-heading-title').text
-                        url = button.get_attribute('href')
-                        
-                        if title and url:
-                            print(f"Found wine via button: {title}")
+            # Wait for either wine elements or buttons to be present
+            try:
+                elements = self.wait.until(
+                    EC.presence_of_all_elements_located((
+                        By.CSS_SELECTOR, 
+                        'article[type-wines], .elementor-button-wrapper a'
+                    ))
+                )
+                
+                # Process wine elements
+                wine_elements = self.driver.find_elements(By.CSS_SELECTOR, 'article[type-wines]')
+                if wine_elements:
+                    for element in wine_elements:
+                        try:
+                            title = element.find_element(By.CSS_SELECTOR, '.elementor-heading-title').text
+                            if not title:
+                                continue
+                                
+                            view_btn = element.find_element(By.CSS_SELECTOR, '.elementor-button-wrapper a')
+                            url = view_btn.get_attribute('href')
+                            
+                            print(f"Found wine: {title}")
                             products.append({
                                 'title': title,
                                 'url': url
                             })
                             
-                    except Exception as e:
-                        continue
-                        
+                        except Exception as e:
+                            continue
+                
+                # If no products found, try buttons approach
+                if not products:
+                    print("Trying alternate approach with View Wine buttons...")
+                    buttons = self.driver.find_elements(By.CSS_SELECTOR, '.elementor-button-wrapper a')
+                    for button in buttons:
+                        try:
+                            container = button.find_element(By.XPATH, './ancestor::article')
+                            title = container.find_element(By.CSS_SELECTOR, '.elementor-heading-title').text
+                            url = button.get_attribute('href')
+                            
+                            if title and url:
+                                print(f"Found wine via button: {title}")
+                                products.append({
+                                    'title': title,
+                                    'url': url
+                                })
+                                
+                        except Exception:
+                            continue
+                            
+            except TimeoutException:
+                print(f"Timeout waiting for products on {producer_url}")
+                
             print(f"\nFinished processing {producer}. Found {len(products)} wines.")
             return products
             
@@ -292,28 +360,56 @@ class InventoryChecker:
             return []
 
     def check_product_details(self, product_url):
-        """Check if a product has bottle shot and label images"""
+        """Check if a product has all required assets with retry logic"""
+        results = {
+            'Has Spec Sheet': False,
+            'Has Shelf-Talker': False,
+            'Has Hi-Res Label': False,
+            'Has Bottle Shot': False
+        }
+
+        if not self.safe_get_url(product_url):
+            return results
+
         try:
-            self.driver.get(product_url)
-            time.sleep(1)
-            
-            images = self.driver.find_elements(By.CSS_SELECTOR, '.product-gallery__image')
-            
-            has_bottle = False
-            has_label = False
-            
-            for img in images:
-                src = img.get_attribute('src').lower()
-                if 'bottle' in src:
-                    has_bottle = True
-                if 'label' in src:
-                    has_label = True
+            # Wait for trade tools to be present
+            try:
+                trade_tools = self.wait.until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, '.elementor-button-wrapper a'))
+                )
+            except TimeoutException:
+                return results
+
+            # Instead of clicking, we'll check the href attributes directly
+            for tool in trade_tools:
+                try:
+                    tool_text = tool.text.strip().lower()
+                    href = tool.get_attribute('href')
                     
-            return has_bottle, has_label
-            
+                    if not href:
+                        continue
+                        
+                    tool_map = {
+                        'spec sheet': 'Has Spec Sheet',
+                        'shelf-talker': 'Has Shelf-Talker',
+                        'hi-res label': 'Has Hi-Res Label',
+                        'bottle shot': 'Has Bottle Shot'
+                    }
+
+                    for text, key in tool_map.items():
+                        if text in tool_text:
+                            # If we find a matching button with an href, consider it available
+                            results[key] = True
+                            break
+
+                except Exception:
+                    continue
+
+            return results
+
         except Exception as e:
             print(f"Error checking product details at {product_url}: {e}")
-            return False, False
+            return results
 
     def process_inventory(self, pdf_path):
         """Main method to process inventory and check website"""
@@ -362,32 +458,45 @@ class InventoryChecker:
                         'On Order': row['On Order'],
                         'Available': row['Available'],
                         'On Website': False,
+                        'Has Spec Sheet': False,
+                        'Has Shelf-Talker': False,
+                        'Has Hi-Res Label': False,
                         'Has Bottle Shot': False,
-                        'Has Label': False,
                         'Product URL': ''
                     }
                     
-                    # Try to find matching product
-                    matching_product = None
-                    for product_info in website_products:
-                        # Check if SKU matches or if both vintage and product name match
-                        if (sku in product_info['title'] or 
-                            (vintage in product_info['title'] and any(word in product_info['title'] for word in product.split()))):
-                            matching_product = product_info
-                            matched_products.add(product_info['title'])
-                            break
-                            
-                    if matching_product:
-                        print(f"Found match for {sku} on website")
+                    # First check if we have a direct SKU to URL mapping
+                    if sku in self.sku_url_mapping:
+                        print(f"Found direct URL mapping for {sku}")
+                        result['On Website'] = True
+                        result['Product URL'] = self.sku_url_mapping[sku]
                         # Check for bottle shot and label
-                        has_bottle, has_label = self.check_product_details(matching_product['url'])
-                        
-                        result.update({
-                            'On Website': True,
-                            'Has Bottle Shot': has_bottle,
-                            'Has Label': has_label,
-                            'Product URL': matching_product['url']
-                        })
+                        asset_results = self.check_product_details(self.sku_url_mapping[sku])
+                        result.update(asset_results)
+                    else:
+                        # Try to find matching product
+                        matching_product = None
+                        for product_info in website_products:
+                            # Check if SKU matches or if both vintage and product name match
+                            if (sku in product_info['title'] or 
+                                (vintage in product_info['title'] and any(word in product_info['title'] for word in product.split()))):
+                                matching_product = product_info
+                                matched_products.add(product_info['title'])
+                                break
+                                
+                        if matching_product:
+                            print(f"Found match for {sku} on website")
+                            # Check for bottle shot and label
+                            results = self.check_product_details(matching_product['url'])
+                            
+                            result.update({
+                                'On Website': True,
+                                'Has Spec Sheet': results['Has Spec Sheet'],
+                                'Has Shelf-Talker': results['Has Shelf-Talker'],
+                                'Has Hi-Res Label': results['Has Hi-Res Label'],
+                                'Has Bottle Shot': results['Has Bottle Shot'],
+                                'Product URL': matching_product['url']
+                            })
                         
                     inventory_results.append(result)
                     
@@ -395,13 +504,15 @@ class InventoryChecker:
                 for product_info in website_products:
                     if product_info['title'] not in matched_products:
                         # Check for bottle shot and label
-                        has_bottle, has_label = self.check_product_details(product_info['url'])
+                        results = self.check_product_details(product_info['url'])
                         
                         website_only.append({
                             'Producer': producer,
                             'Product Name': product_info['title'],
-                            'Has Bottle Shot': has_bottle,
-                            'Has Label': has_label,
+                            'Has Spec Sheet': results['Has Spec Sheet'],
+                            'Has Shelf-Talker': results['Has Shelf-Talker'],
+                            'Has Hi-Res Label': results['Has Hi-Res Label'],
+                            'Has Bottle Shot': results['Has Bottle Shot'],
                             'Product URL': product_info['url']
                         })
             
