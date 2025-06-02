@@ -53,7 +53,11 @@ class InventoryChecker:
             
             # Greenock Creek Alice's Shiraz 2020
             'S1GCALSH20': ['S1GCSHI20'],
-            'S1GCSHI20': ['S1GCALSH20']
+            'S1GCSHI20': ['S1GCALSH20'],
+            
+            # David Finlayson GS Cabernet Sauvignon 2020
+            'S1EDGGCS20-6': ['S1EDGGCSM20'],
+            'S1EDGGCSM20': ['S1EDGGCS20-6']
         }
         
         # Common varietal terms for matching
@@ -264,7 +268,8 @@ class InventoryChecker:
             'GREENOCK': 'Greenock Creek',
             'NEW BLOOD': 'NEWBLOOD',
             'NEWBLOOD NON-ALCOHOLIC': 'NEWBLOOD',
-            'ANTUCURA CHERIE': 'Antucura'
+            'ANTUCURA CHERIE': 'Antucura',
+            'MT FISHTAIL': 'Mount Fishtail'
         }
         
         # Dictionary to store learned URL patterns
@@ -884,6 +889,11 @@ class InventoryChecker:
             sku = row['SKU']
             product_name = row['Product']
             
+            # Skip specific SKU that should be excluded entirely
+            if sku == 'S1EDGGCSM20':
+                print(f"Skipping SKU {sku} as per configuration")
+                continue
+                
             # Try direct SKU mapping first
             if sku in self.sku_url_mapping:
                 product_url = self.sku_url_mapping[sku]
